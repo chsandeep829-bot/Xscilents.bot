@@ -30,7 +30,7 @@ WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "https://xscilents-bot.onrender
 
 # ---------- DATA STORAGE & MULTI-FILE MANAGEMENT ----------
 active_checkout_sessions = {}
-used_utrs = set()
+processed_transactions = set()
 user_purchased_keys = {}
 
 def get_filename_for_product(product_name):
@@ -54,7 +54,6 @@ def load_license_keys(filename):
         with open(filename, "r") as f:
             return [line.strip() for line in f if line.strip() and not line.startswith("#")]
     
-    # Default fallback keys if file doesn't exist yet
     default_keys = [f"SAMPLE-{filename.split('_')[1].split('.')[0].upper()}-1234"]
     save_license_keys(filename, default_keys)
     return default_keys
@@ -98,19 +97,25 @@ async def handle_notification_webhook(request):
         else:
             data = await request.post()
 
-        received_text = data.get("key", "") or data.get("message", "") or str(data)
+        # Combine Title and Message body to catch both amount and deposit text
+        title = data.get("title", "")
+        message = data.get("message", "") or data.get("key", "") or data.get("text", "")
+        received_text = f"{title} {message}"
+        
         logger.info(f"Notification Received via Webhook: {received_text}")
 
-        utr_match = re.search(r"\b\d{12}\b", received_text)
+        # Check for SBI deposit signature and amount extraction
+        is_sbi_deposit = "Deposited in your SBI bank" in received_text or "SBI" in received_text
         amt_match = re.search(
             r"(?:Rs\.?|INR|₹)\s*(\d+(?:\.\d{1,2})?)", received_text, re.IGNORECASE
         )
 
-        if utr_match and amt_match:
-            detected_utr = utr_match.group(0)
+        if is_sbi_deposit and amt_match:
             detected_amount = float(amt_match.group(1))
-
-            if detected_utr in used_utrs:
+            
+            # Use the notification text as a unique identifier to prevent duplicates
+            tx_signature = received_text.strip()
+            if tx_signature in processed_transactions:
                 return web.Response(text="Duplicate transaction ignored.", status=200)
 
             for user_id, session in list(active_checkout_sessions.items()):
@@ -135,7 +140,7 @@ async def handle_notification_webhook(request):
                     delivered_key = current_keys.pop(0)
                     save_license_keys(target_file, current_keys)
 
-                    used_utrs.add(detected_utr)
+                    processed_transactions.add(tx_signature)
                     active_checkout_sessions.pop(user_id, None)
 
                     if user_id not in user_purchased_keys:
@@ -232,7 +237,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🆘 **Customer Support**\n\nIf you are facing any issues with payments,"
             " key delivery, or loader activation, feel free to reach out:\n\n💬"
             " Support Admin: @c_sandeep\n⏰ Support Hours: 24/7 Automated"
-            " Delivery\n\nPlease keep your Order ID or UTR number handy when"
+            " Delivery\n\nPlease keep your Order ID handy when"
             " contacting support."
         )
         await update.message.reply_text(
@@ -303,7 +308,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "🤖 **The cloud system is monitoring payments"
                 " 24/7.**\n\nOnce completed, your license key will deliver right"
-                " here instantly. You do not need to send UTR manually.",
+                " here instantly.",
                 reply_markup=main_menu,
             )
         except Exception as e:
@@ -343,7 +348,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", server_port)
 
-    logger.info(f"Starting web server target configuration on port: {server_port} with Webhook URL: {WEBHOOK_BASE_URL}/webhook")
+    logger.info(f"Starting web server target configuration on port: {server_port}")
     await site.start()
 
     logger.info(
