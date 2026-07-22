@@ -102,10 +102,17 @@ async def handle_notification_webhook(request):
             data = await request.post()
 
         title = data.get("title", "")
-        message = data.get("message", "") or data.get("key", "") or data.get("text", "")
+        message = (
+            data.get("body", "") 
+            or data.get("message", "") 
+            or data.get("key", "") 
+            or data.get("text", "")
+        )
         received_text = f"{title} {message}"
         
-        logger.info(f"Notification Received via Webhook: {received_text}")
+        logger.info("--- WEBHOOK RECEIVED ---")
+        logger.info(f"Parsed Content: {received_text}")
+        logger.info(f"Active Sessions in Memory: {list(active_checkout_sessions.keys())}")
 
         is_sbi_deposit = "Deposited in your SBI bank" in received_text or "SBI" in received_text
         amt_match = re.search(
@@ -114,12 +121,19 @@ async def handle_notification_webhook(request):
 
         if is_sbi_deposit and amt_match:
             detected_amount = float(amt_match.group(1))
+            logger.info(f"Detected Amount: ₹{detected_amount}")
             
             tx_signature = received_text.strip()
             if tx_signature in processed_transactions:
+                logger.warning("Duplicate transaction ignored.")
                 return web.Response(text="Duplicate transaction ignored.", status=200)
 
+            if not active_checkout_sessions:
+                logger.warning("❌ PAYMENT FAILED: No active checkout sessions found in memory!")
+                return web.Response(text="No active checkout sessions.", status=200)
+
             for user_id, session in list(active_checkout_sessions.items()):
+                logger.info(f"Comparing session price ₹{session['price']} with detected amount ₹{detected_amount}")
                 if float(session["price"]) == detected_amount:
 
                     product_name = session["product"]
@@ -134,9 +148,7 @@ async def handle_notification_webhook(request):
                                 " Contact support immediately."
                             ),
                         )
-                        return web.Response(
-                            text="Stock Empty fallback executed.", status=200
-                        )
+                        return web.Response(text="Stock Empty fallback executed.", status=200)
 
                     delivered_key = current_keys.pop(0)
                     save_license_keys(target_file, current_keys)
@@ -162,14 +174,14 @@ async def handle_notification_webhook(request):
                         parse_mode="Markdown",
                         reply_markup=main_menu,
                     )
+                    logger.info(f"SUCCESS: Key delivered to user {user_id}")
                     return web.Response(text="Key Auto-Delivered successfully.", status=200)
 
-        return web.Response(
-            text="Notification parsed but no matching active transaction found.",
-            status=200,
-        )
+        logger.warning("❌ Notification received, but no matching price found in active sessions.")
+        return web.Response(text="No matching transaction found.", status=200)
+        
     except Exception as e:
-        logger.error(f"Error handling Webhook: {e}")
+        logger.error(f"Error handling Webhook: {e}", exc_info=True)
         return web.Response(text="Internal server error.", status=500)
 
 
@@ -343,7 +355,6 @@ async def main():
     web_app = web.Application()
     web_app["tg_bot"] = application.bot
     
-    # Routes for health check and webhooks
     web_app.router.add_get("/", index)
     web_app.router.add_post("/webhook", handle_notification_webhook)
 
