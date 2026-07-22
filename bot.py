@@ -88,6 +88,10 @@ xscilent_menu = ReplyKeyboardMarkup(
 
 
 # ---------- AUTOMATION WEB RECEIVER ----------
+async def index(request):
+    """Simple root health-check endpoint for UptimeRobot."""
+    return web.Response(text="Xscilent Bot is active and running!", status=200)
+
 async def handle_notification_webhook(request):
     """Listens for payment notifications forwarded from the SMS Forwarder app."""
     try:
@@ -97,14 +101,12 @@ async def handle_notification_webhook(request):
         else:
             data = await request.post()
 
-        # Combine Title and Message body to catch both amount and deposit text
         title = data.get("title", "")
         message = data.get("message", "") or data.get("key", "") or data.get("text", "")
         received_text = f"{title} {message}"
         
         logger.info(f"Notification Received via Webhook: {received_text}")
 
-        # Check for SBI deposit signature and amount extraction
         is_sbi_deposit = "Deposited in your SBI bank" in received_text or "SBI" in received_text
         amt_match = re.search(
             r"(?:Rs\.?|INR|₹)\s*(\d+(?:\.\d{1,2})?)", received_text, re.IGNORECASE
@@ -113,7 +115,6 @@ async def handle_notification_webhook(request):
         if is_sbi_deposit and amt_match:
             detected_amount = float(amt_match.group(1))
             
-            # Use the notification text as a unique identifier to prevent duplicates
             tx_signature = received_text.strip()
             if tx_signature in processed_transactions:
                 return web.Response(text="Duplicate transaction ignored.", status=200)
@@ -341,6 +342,9 @@ async def main():
 
     web_app = web.Application()
     web_app["tg_bot"] = application.bot
+    
+    # Routes for health check and webhooks
+    web_app.router.add_get("/", index)
     web_app.router.add_post("/webhook", handle_notification_webhook)
 
     server_port = int(os.environ.get("PORT", 8080))
