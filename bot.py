@@ -28,17 +28,41 @@ MERCHANT_UPI_ID = os.getenv("MERCHANT_UPI_ID", "c.sandeep@superyes")
 MERCHANT_NAME = os.getenv("MERCHANT_NAME", "Key Store")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "https://xscilents-bot.onrender.com")
 
-# ---------- DATA STORAGE ----------
+# ---------- DATA STORAGE & MULTI-FILE MANAGEMENT ----------
 active_checkout_sessions = {}
 used_utrs = set()
 user_purchased_keys = {}
-license_keys = [
-    "XS-5H-ABCD-1234",
-    "XS-1D-EFGH-5678",
-    "XS-7D-IJKL-9012",
-    "XS-30D-MNOP-3456",
-    "XS-FS-QRST-7890",
-]
+
+def get_filename_for_product(product_name):
+    """Determine which text file to use based on the selected product."""
+    product_name = product_name.upper()
+    if "5 HOURS" in product_name:
+        return "keys_5h.txt"
+    elif "1 DAY" in product_name:
+        return "keys_1d.txt"
+    elif "7 DAYS" in product_name:
+        return "keys_7d.txt"
+    elif "30 DAYS" in product_name:
+        return "keys_30d.txt"
+    elif "FULL SEASON" in product_name:
+        return "keys_season.txt"
+    return "keys_general.txt"
+
+def load_license_keys(filename):
+    """Load available keys from the specified text file or create defaults."""
+    if os.path.exists(filename):
+        with open(filename, "r") as f:
+            return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    
+    # Default fallback keys if file doesn't exist yet
+    default_keys = [f"SAMPLE-{filename.split('_')[1].split('.')[0].upper()}-1234"]
+    save_license_keys(filename, default_keys)
+    return default_keys
+
+def save_license_keys(filename, keys_list):
+    """Save remaining keys back to the specified text file."""
+    with open(filename, "w") as f:
+        f.write("\n".join(keys_list) + "\n")
 
 # ---------- MENUS ----------
 main_menu = ReplyKeyboardMarkup(
@@ -92,11 +116,15 @@ async def handle_notification_webhook(request):
             for user_id, session in list(active_checkout_sessions.items()):
                 if float(session["price"]) == detected_amount:
 
-                    if not license_keys:
+                    product_name = session["product"]
+                    target_file = get_filename_for_product(product_name)
+                    current_keys = load_license_keys(target_file)
+
+                    if not current_keys:
                         await request.app["tg_bot"].send_message(
                             chat_id=user_id,
                             text=(
-                                "⚠️ **Payment Confirmed!** However, stock pool is empty."
+                                f"⚠️ **Payment Confirmed for {product_name}!** However, stock pool for this duration is empty."
                                 " Contact support immediately."
                             ),
                         )
@@ -104,14 +132,16 @@ async def handle_notification_webhook(request):
                             text="Stock Empty fallback executed.", status=200
                         )
 
-                    delivered_key = license_keys.pop(0)
+                    delivered_key = current_keys.pop(0)
+                    save_license_keys(target_file, current_keys)
+
                     used_utrs.add(detected_utr)
                     active_checkout_sessions.pop(user_id, None)
 
                     if user_id not in user_purchased_keys:
                         user_purchased_keys[user_id] = []
                     user_purchased_keys[user_id].append({
-                        "product": session["product"],
+                        "product": product_name,
                         "key": delivered_key,
                         "price": session["price"],
                     })
@@ -120,7 +150,7 @@ async def handle_notification_webhook(request):
                         chat_id=user_id,
                         text=(
                             "✅ **Payment Received and Verified Automatically!**\n\n📦"
-                            f" Product: `{session['product']}`\n🔑 Your"
+                            f" Product: `{product_name}`\n🔑 Your"
                             f" Key:\n`{delivered_key}`"
                         ),
                         parse_mode="Markdown",
