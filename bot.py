@@ -317,7 +317,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
       random_suffix = random.randint(1000, 9999)
       order_id = f"ORD{random_suffix}"
 
-      # Call ZeroGateway Initiate Payment API with recipient and transaction identifiers
+      # Call ZeroGateway Initiate Payment API with all expected transaction parameters
       payment_url = None
       payment_token = None
 
@@ -330,9 +330,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "public_key": PUBLIC_KEY,
             "amount": str(base_price),
             "currency": "INR",
-            "upi_address": "c.sandeep@superyes",  # Routes payment to c.sandeep@superyes
-            "order_id": order_id,                 # Resolves backend Transaction::find() null reference error
+            "upi_address": "c.sandeep@superyes",
+            "order_id": order_id,
             "transaction_id": order_id,
+            "id": order_id,
+            "payment_type": "upi",
+            "name": f"User_{user_id}",
+            "phone": "9999999999",
+            "email": "customer@superyes.com",
+            "purpose": text,
             "callback_url": "https://xscilents-bot.onrender.com/webhook"
         }
         try:
