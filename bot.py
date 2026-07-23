@@ -208,7 +208,6 @@ async def handle_notification_webhook(request):
     data = await request.json()
     signature = request.headers.get("X-Uropay-Signature", "")
 
-    # Verify signature if secret is configured
     if URO_SECRET and not verify_webhook_signature(data, URO_SECRET, signature):
       logger.warning("Invalid webhook signature received.")
       return web.Response(text="Unauthorized signature", status=401)
@@ -217,7 +216,6 @@ async def handle_notification_webhook(request):
     merchant_order_id = data.get("merchantOrderId")
     event = data.get("event", "")
 
-    # If payment succeeded or order completed/companion SMS received
     if event in ["companion.sms.data", "order.status.changed"] or data.get("orderStatus") == "COMPLETED":
       matched_user_id = None
       for user_id, session in list(active_checkout_sessions.items()):
@@ -276,14 +274,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
   if context.user_data is None:
     context.user_data = {}
 
-  # Check if user has an active checkout session waiting for a UTR input
   if user_id in active_checkout_sessions and active_checkout_sessions[user_id].get("waiting_for_utr"):
     if re.match(r"^\d{6,15}$", text.strip()):
       utr_number = text.strip()
       session = active_checkout_sessions[user_id]
       uro_pay_order_id = session["uroPayOrderId"]
 
-      # Call Uropay PATCH /order/update endpoint
       hashed_secret = get_hashed_secret(URO_SECRET)
       headers = {
           "Accept": "application/json",
@@ -377,7 +373,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
       base_price = int(prices[0])
-      amount_in_paise = base_price * 100  # UroPay requires amount in paise
+      amount_in_paise = base_price * 100
       merchant_order_id = f"ORD{random.randint(10000, 99999)}"
 
       hashed_secret = get_hashed_secret(URO_SECRET)
@@ -408,14 +404,18 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
               data = res_data.get("data", {})
               uro_pay_order_id = data.get("uroPayOrderId")
               qr_code_base64 = data.get("qrCode")
+            else:
+              await update.message.reply_text(f"❌ UroPay Error ({resp.status}): {resp_text}")
+              return
         except Exception as api_err:
           logger.error(f"Uropay API call exception: {api_err}", exc_info=True)
+          await update.message.reply_text(f"❌ API Exception: {str(api_err)}")
+          return
 
       if not uro_pay_order_id or not qr_code_base64:
-        await update.message.reply_text("❌ Failed to initiate Uropay order. Please check your API credentials or try again later.")
+        await update.message.reply_text("❌ Failed to initiate Uropay order. Missing order ID or QR code in response.")
         return
 
-      # Save checkout session and mark waiting for UTR
       active_checkout_sessions[user_id] = {
           "product": text,
           "price": float(base_price),
@@ -424,7 +424,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
           "waiting_for_utr": True
       }
 
-      # Decode Base64 QR Code from Uropay response
       if "," in qr_code_base64:
         qr_code_base64 = qr_code_base64.split(",")[1]
       img_bytes = base64.b64decode(qr_code_base64)
