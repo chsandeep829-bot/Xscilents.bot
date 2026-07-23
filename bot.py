@@ -33,8 +33,8 @@ TOKEN = "8979881938:AAEAcd8z64fDbJfwTvi6-Bw0eJCJa6M_RTY"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "your_github_pat_here")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
 
-# ZeroGateway API Credentials
-PUBLIC_KEY = "pk_S4ORlDY0HZnx8IsK"
+# ZeroGateway API Credentials (Corrected)
+PUBLIC_KEY = "pk_S4ORlDY0HZnx8lsK"
 SECRET_KEY = "sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
 GATEWAY_INITIATE_URL = "https://zerogateway.com/v1/payment/initiate"
 
