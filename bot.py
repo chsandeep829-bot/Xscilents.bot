@@ -35,9 +35,9 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
 MERCHANT_UPI_ID = "c.sandeep@superyes"
 MERCHANT_NAME = "Key Store"
 
-# API Gateway Credentials
-PUBLIC_KEY = "Pk_S4ORIDY0HZnx8lsK"
-SECRET_KEY = "sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
+# API Gateway Credentials (Updated with your keys)
+PUBLIC_KEY = "pk_S4ORIDY0HZnx8IsK"
+SECRET_KEY = "Sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
 
 # ---------- DATA STORAGE ----------
 active_checkout_sessions = {}
@@ -236,7 +236,9 @@ async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_T
       return
 
     try:
+      # ⚠️ REPLACE THIS URL WITH YOUR PAYMENT GATEWAY'S ACTUAL STATUS CHECK ENDPOINT
       api_url = f"https://api.yourgateway.com/v1/orders/{order_id}"
+      
       payment_successful = False
       detected_utr = f"UTR{random.randint(100000000, 999999999)}"
 
