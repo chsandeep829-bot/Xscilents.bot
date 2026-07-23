@@ -1,11 +1,11 @@
 import asyncio
 import io
 import logging
-import os  # Critical: Reads the dynamic server port configurations on Render
+import os
 import random
 import re
 import urllib.parse
-import aiohttp
+from aiohttp import web
 import qrcode
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
@@ -361,7 +361,6 @@ async def main():
   await application.initialize()
   await application.start()
 
-  # Set up aiohttp web server to bind to Render's required PORT environment variable
   web_app = web.Application()
   web_app["tg_bot"] = application.bot
   web_app.router.add_get("/", health_check)
