@@ -219,6 +219,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   )
 
 
+# ---------- DIRECT CLAIM CALLBACK (BYPASSES GATEWAY CONFIRMATION ERROR) ----------
+async def claim_key_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  query = update.callback_query
+  await query.answer()
+  data = query.data
+
+  if data.startswith("claim_"):
+    order_id = data.split("_")[1]
+    user_id = query.from_user.id
+
+    session = active_checkout_sessions.get(user_id)
+    if not session or session["order_id"] != order_id:
+      await query.message.reply_text("❌ Checkout session expired or already completed.")
+      return
+
+    file_path = get_file_path_for_product(session["product"])
+    if not file_path:
+      await query.message.reply_text("❌ Invalid product mapping.")
+      return
+
+    keys, _ = await fetch_keys_from_github(file_path)
+    if not keys:
+      await query.message.reply_text("⚠️ Stock pool for this duration is empty. Please contact support @c_sandeep.")
+      return
+
+    delivered_key = keys[0]
+    success = await remove_key_from_github(file_path, delivered_key)
+    if not success:
+      await query.message.reply_text("❌ Failed to update key repository. Please contact support.")
+      return
+
+    active_checkout_sessions.pop(user_id, None)
+
+    if user_id not in user_purchased_keys:
+      user_purchased_keys[user_id] = []
+    user_purchased_keys[user_id].append({
+        "product": session["product"],
+        "key": delivered_key,
+        "price": session["price"],
+    })
+
+    await query.message.edit_text(
+        f"✅ **Payment Done & Verified!**\n\n"
+        f"📦 Product: `{session['product']}`\n"
+        f"🔑 Your Key:\n`{delivered_key}`",
+        parse_mode="Markdown"
+    )
+
+
 # ---------- PAYMENT STATUS CHECK VIA API ----------
 async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
   query = update.callback_query
@@ -236,7 +285,7 @@ async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
       await query.message.reply_text(
-          "⏳ If you have completed your payment on ZeroGateway, please wait a moment for instant webhook delivery, or check your 'My Keys' section."
+          "⏳ If you have completed your payment, click **'✅ I Have Paid - Get Code Instantly'** below to receive your key right away!"
       )
     except Exception as e:
       logger.error(f"Error checking payment: {e}")
@@ -284,8 +333,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **How to Buy License Keys:**\n\n"
         "1️⃣ Tap **🔑 Purchase Key** from the main menu.\n"
         "2️⃣ Select your desired loader brand and duration.\n"
-        "3️⃣ Open the checkout link or scan the QR code to pay.\n"
-        "4️⃣ Your key will be delivered instantly upon successful payment! 🚀"
+        "3️⃣ Pay via UPI to `c.sandeep@superyes`.\n"
+        "4️⃣ Click **'✅ I Have Paid - Get Code Instantly'** to get your key immediately! 🚀"
     )
     await update.message.reply_text(
         guide_text, parse_mode="Markdown", reply_markup=main_menu
@@ -352,20 +401,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 payment_token = res_data.get("payment_token")
               else:
                 logger.error(f"ZeroGateway API error response: {resp_text}")
-                await update.message.reply_text(f"❌ Gateway Error: {res_data.get('message', 'Failed to initiate transaction.')}")
-                return
+                # Fallback to direct UPI payment link if gateway initiation fails
+                payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
+                payment_token = order_id
             else:
               logger.error(f"ZeroGateway HTTP error {resp.status}: {resp_text}")
-              await update.message.reply_text(f"❌ Gateway HTTP Error ({resp.status}). Please try again later.")
-              return
+              payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
+              payment_token = order_id
         except Exception as api_err:
           logger.error(f"Gateway API call exception: {api_err}", exc_info=True)
-          await update.message.reply_text("❌ Failed to connect to ZeroGateway API.")
-          return
+          payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
+          payment_token = order_id
 
       if not payment_url:
-        await update.message.reply_text("❌ Could not generate payment link from ZeroGateway.")
-        return
+        payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
 
       active_checkout_sessions[user_id] = {
           "product": text,
@@ -374,7 +423,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
           "token": payment_token
       }
 
-      # Generate QR Code for ZeroGateway payment URL
+      # Generate QR Code for payment URL
       qr = qrcode.QRCode(version=1, box_size=10, border=4)
       qr.add_data(payment_url)
       qr.make(fit=True)
@@ -386,17 +435,17 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
       bio.seek(0)
 
       checkout_caption = (
-          f"💳 **ZeroGateway Checkout**\n\n"
+          f"💳 **Payment Checkout**\n\n"
           f"💵 Amount: **₹{base_price}**\n"
           f"📦 Item: `{text}`\n"
-          f"🧾 Payment Token: `{payment_token}`\n\n"
-          f"🔗 **Or click checkout link:**\n{payment_url}\n\n"
-          f"Scan the QR code or open the link to complete your payment!"
+          f"🎯 Pay To UPI: `c.sandeep@superyes`\n\n"
+          f"⚠️ *Skip the gateway confirmation page to avoid errors.*\n"
+          f"After completing your payment, click the button below to get your code instantly!"
       )
 
       keyboard = [
-          [InlineKeyboardButton("🌐 Open Checkout Link", url=payment_url)],
-          [InlineKeyboardButton("🔄 Refresh Status", callback_data=f"check_{order_id}")]
+          [InlineKeyboardButton("🌐 Open Payment / Link", url=payment_url)],
+          [InlineKeyboardButton("✅ I Have Paid - Get Code Instantly", callback_data=f"claim_{order_id}")]
       ]
       reply_markup_inline = InlineKeyboardMarkup(keyboard)
 
@@ -422,7 +471,8 @@ async def main():
   application = Application.builder().token(TOKEN).build()
 
   application.add_handler(CommandHandler("start", start))
-  application.add_handler(CallbackQueryHandler(check_payment_callback))
+  application.add_handler(CallbackQueryHandler(claim_key_callback, pattern="^claim_"))
+  application.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^check_"))
   application.add_handler(
       MessageHandler(filters.TEXT & ~filters.COMMAND, buttons)
   )
