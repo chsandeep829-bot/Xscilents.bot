@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import logging
 import os
 import random
@@ -234,11 +235,9 @@ async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_T
       return
 
     try:
-      # If payment token / order was already tracked or we want to verify via webhook/manual check
       await query.message.reply_text(
-          "⏳ If you have completed your payment on ZeroGateway, please wait a moment for instant webhook delivery, or click your 'My Keys' section shortly."
+          "⏳ If you have completed your payment on ZeroGateway, please wait a moment for instant webhook delivery, or check your 'My Keys' section."
       )
-
     except Exception as e:
       logger.error(f"Error checking payment: {e}")
       await query.message.reply_text("❌ Error communicating with payment gateway API.")
@@ -318,29 +317,46 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
       random_suffix = random.randint(1000, 9999)
       order_id = f"ORD{random_suffix}"
 
-      # Call ZeroGateway Initiate Payment API
-      payment_url = "https://zerogateway.com/v1/checkout/DEFAULT"
-      payment_token = f"TXN{random.randint(1000000000, 9999999999)}"
+      # Call ZeroGateway Initiate Payment API using form-data
+      payment_url = None
+      payment_token = None
 
       async with aiohttp.ClientSession() as client:
         headers = {
-            "Authorization": f"Bearer {SECRET_KEY}" #
+            "Authorization": f"Bearer {SECRET_KEY}",
+            "Accept": "application/json"
         }
         payload = {
-            "public_key": PUBLIC_KEY, #
-            "amount": base_price, #
-            "currency": "INR", #
-            "callback_url": "https://xscilents-bot.onrender.com/webhook" #
+            "public_key": PUBLIC_KEY,
+            "amount": str(base_price),
+            "currency": "INR",
+            "callback_url": "https://xscilents-bot.onrender.com/webhook"
         }
         try:
-          async with client.post(GATEWAY_INITIATE_URL, headers=headers, json=payload, timeout=10) as resp:
+          async with client.post(GATEWAY_INITIATE_URL, headers=headers, data=payload, timeout=10) as resp:
+            resp_text = await resp.text()
+            logger.info(f"ZeroGateway response status: {resp.status}, body: {resp_text}")
             if resp.status in [200, 201]:
-              res_data = await resp.json()
+              res_data = json.loads(resp_text)
               if res_data.get("success"):
-                payment_url = res_data.get("payment_url", payment_url) #
-                payment_token = res_data.get("payment_token", payment_token) #
+                payment_url = res_data.get("payment_url")
+                payment_token = res_data.get("payment_token")
+              else:
+                logger.error(f"ZeroGateway API error response: {resp_text}")
+                await update.message.reply_text(f"❌ Gateway Error: {res_data.get('message', 'Failed to initiate transaction.')}")
+                return
+            else:
+              logger.error(f"ZeroGateway HTTP error {resp.status}: {resp_text}")
+              await update.message.reply_text(f"❌ Gateway HTTP Error ({resp.status}). Please try again later.")
+              return
         except Exception as api_err:
-          logger.warning(f"Gateway API call warning: {api_err}")
+          logger.error(f"Gateway API call exception: {api_err}", exc_info=True)
+          await update.message.reply_text("❌ Failed to connect to ZeroGateway API.")
+          return
+
+      if not payment_url:
+        await update.message.reply_text("❌ Could not generate payment link from ZeroGateway.")
+        return
 
       active_checkout_sessions[user_id] = {
           "product": text,
