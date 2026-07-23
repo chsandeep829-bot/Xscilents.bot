@@ -33,9 +33,9 @@ TOKEN = "8979881938:AAEAcd8z64fDbJfwTvi6-Bw0eJCJa6M_RTY"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "your_github_pat_here")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
 
-# ZeroGateway API Credentials
-PUBLIC_KEY = "pk_S4ORlDY0HZnx8lsK"
-SECRET_KEY = "sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
+# ZeroGateway API Credentials (Updated)
+PUBLIC_KEY = "QSB85YVISZLEG2X5"
+SECRET_KEY = "IA3SAS9KYIBD4TZCUCQCVC6J7LBBPNFP227PWLYEBNA95LTCGD"
 GATEWAY_INITIATE_URL = "https://zerogateway.com/v1/payment/initiate"
 
 # ---------- DATA STORAGE ----------
@@ -401,7 +401,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 payment_token = res_data.get("payment_token")
               else:
                 logger.error(f"ZeroGateway API error response: {resp_text}")
-                # Fallback to direct UPI payment link if gateway initiation fails
                 payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
                 payment_token = order_id
             else:
