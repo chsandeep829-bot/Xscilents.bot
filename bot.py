@@ -1,15 +1,15 @@
 import asyncio
 import base64
+import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import random
 import re
-import urllib.parse
 import aiohttp
 from aiohttp import web
-import qrcode
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -33,14 +33,19 @@ TOKEN = "8979881938:AAEAcd8z64fDbJfwTvi6-Bw0eJCJa6M_RTY"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "your_github_pat_here")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
 
-# Uropay API Credentials (Replace with your actual Uropay keys if required)
+# Uropay Official API Credentials
 URO_API_KEY = os.environ.get("URO_API_KEY", "your_uropay_api_key_here")
-URO_INITIATE_URL = "https://api.uropay.com/v1/payment/initiate"  # Update URL if Uropay endpoint differs
+URO_SECRET = os.environ.get("URO_SECRET", "your_uropay_secret_here")
+URO_BASE_URL = "https://api.uropay.me"
 
 # ---------- DATA STORAGE ----------
 active_checkout_sessions = {}
-used_utrs = set()
 user_purchased_keys = {}
+
+
+# ---------- HELPER: HASH SECRET FOR AUTHORIZATION ----------
+def get_hashed_secret(secret: str) -> str:
+  return hashlib.sha512(secret.encode("utf-8")).hexdigest()
 
 
 # ---------- PRODUCT TO GITHUB FILE MAPPING ----------
@@ -112,6 +117,64 @@ async def remove_key_from_github(file_path, key_to_remove):
   return False
 
 
+# ---------- WEBHOOK SIGNATURE VERIFICATION (UROPAY SPEC) ----------
+FIXED_TAIL = ["uroPayOrderId", "merchantOrderId", "detectedAt", "environment"]
+
+
+def build_transaction_payload(payload):
+  fixed_set = set(FIXED_TAIL + ["event"])
+  ordered = {}
+  if "event" in payload:
+    ordered["event"] = payload["event"]
+  middle = sorted((k for k in payload if k not in fixed_set))
+  for k in middle:
+    ordered[k] = payload[k]
+  for k in FIXED_TAIL:
+    ordered[k] = payload.get(k)
+  return ordered
+
+
+def build_order_status_payload(payload):
+  return {
+      "event": payload["event"],
+      "uroPayOrderId": payload["uroPayOrderId"],
+      "merchantOrderId": payload["merchantOrderId"],
+      "orderStatus": payload["orderStatus"],
+      "submittedUTR": payload.get("submittedUTR"),
+      "environment": payload["environment"],
+  }
+
+
+def build_utr_submitted_payload(payload):
+  return {
+      "event": payload["event"],
+      "uroPayOrderId": payload["uroPayOrderId"],
+      "merchantOrderId": payload["merchantOrderId"],
+      "orderStatus": payload["orderStatus"],
+      "submittedUTR": payload.get("submittedUTR"),
+      "amount": payload["amount"],
+      "customerName": payload["customerName"],
+      "customerEmail": payload["customerEmail"],
+      "customerVPA": payload.get("customerVPA"),
+      "environment": payload["environment"],
+      "utrSubmittedAt": payload.get("utrSubmittedAt"),
+  }
+
+
+def verify_webhook_signature(payload: dict, secret: str, signature: str) -> bool:
+  if payload.get("event") == "order.status.utrsubmitted":
+    ordered = build_utr_submitted_payload(payload)
+  elif "orderStatus" in payload:
+    ordered = build_order_status_payload(payload)
+  else:
+    ordered = build_transaction_payload(payload)
+
+  hashed_secret = hashlib.sha512(secret.encode()).hexdigest()
+  body = json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
+  computed = hmac.new(hashed_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+  return hmac.compare_digest(computed, signature)
+
+
 # ---------- MENUS ----------
 main_menu = ReplyKeyboardMarkup(
     [
@@ -143,70 +206,59 @@ async def health_check(request):
 async def handle_notification_webhook(request):
   try:
     data = await request.json()
-    detected_utr = data.get("utr", data.get("transaction_id", data.get("payment_token", "")))
-    detected_amount = data.get("amount", data.get("paid_amount", 0))
+    signature = request.headers.get("X-Uropay-Signature", "")
 
-    if detected_utr and detected_amount:
-      detected_utr = str(detected_utr)
-      detected_amount = float(detected_amount)
+    # Verify signature if secret is configured
+    if URO_SECRET and not verify_webhook_signature(data, URO_SECRET, signature):
+      logger.warning("Invalid webhook signature received.")
+      return web.Response(text="Unauthorized signature", status=401)
 
-      if detected_utr in used_utrs:
-        return web.Response(text="Duplicate transaction ignored.", status=200)
+    uro_pay_order_id = data.get("uroPayOrderId")
+    merchant_order_id = data.get("merchantOrderId")
+    event = data.get("event", "")
 
+    # If payment succeeded or order completed/companion SMS received
+    if event in ["companion.sms.data", "order.status.changed"] or data.get("orderStatus") == "COMPLETED":
       matched_user_id = None
-      matched_session = None
-
       for user_id, session in list(active_checkout_sessions.items()):
-        if abs(float(session["price"]) - detected_amount) < 0.01:
+        if session.get("merchantOrderId") == merchant_order_id or session.get("uroPayOrderId") == uro_pay_order_id:
           matched_user_id = user_id
-          matched_session = session
           break
 
-      if matched_user_id and matched_session:
-        file_path = get_file_path_for_product(matched_session["product"])
-        if not file_path:
-          return web.Response(text="Invalid product mapping.", status=400)
+      if matched_user_id:
+        session = active_checkout_sessions[matched_user_id]
+        file_path = get_file_path_for_product(session["product"])
+        if file_path:
+          keys, _ = await fetch_keys_from_github(file_path)
+          if keys:
+            delivered_key = keys[0]
+            success = await remove_key_from_github(file_path, delivered_key)
+            if success:
+              active_checkout_sessions.pop(matched_user_id, None)
 
-        keys, _ = await fetch_keys_from_github(file_path)
-        if not keys:
-          await request.app["tg_bot"].send_message(
-              chat_id=matched_user_id,
-              text="⚠️ **Payment Confirmed!** However, stock pool for this duration is empty. Contact support.",
-          )
-          return web.Response(text="Stock Empty fallback executed.", status=200)
+              if matched_user_id not in user_purchased_keys:
+                user_purchased_keys[matched_user_id] = []
+              user_purchased_keys[matched_user_id].append({
+                  "product": session["product"],
+                  "key": delivered_key,
+                  "price": session["price"],
+              })
 
-        delivered_key = keys[0]
-        success = await remove_key_from_github(file_path, delivered_key)
-        if not success:
-          return web.Response(text="Failed to update key repository.", status=500)
+              await request.app["tg_bot"].send_message(
+                  chat_id=matched_user_id,
+                  text=(
+                      "✅ **Payment Verified & Key Delivered Successfully!**\n\n"
+                      f"📦 Product: `{session['product']}`\n"
+                      f"🔑 Your Key:\n`{delivered_key}`"
+                  ),
+                  parse_mode="Markdown",
+                  reply_markup=main_menu,
+              )
 
-        used_utrs.add(detected_utr)
-        active_checkout_sessions.pop(matched_user_id, None)
-
-        if matched_user_id not in user_purchased_keys:
-          user_purchased_keys[matched_user_id] = []
-        user_purchased_keys[matched_user_id].append({
-            "product": matched_session["product"],
-            "key": delivered_key,
-            "price": matched_session["price"],
-        })
-
-        await request.app["tg_bot"].send_message(
-            chat_id=matched_user_id,
-            text=(
-                "✅ **Payment Received and Verified Automatically!**\n\n"
-                f"📦 Product: `{matched_session['product']}`\n"
-                f"🔑 Your Key:\n`{delivered_key}`"
-            ),
-            parse_mode="Markdown",
-            reply_markup=main_menu,
-        )
-        return web.Response(text="Key Auto-Delivered successfully.", status=200)
-
-    return web.Response(text="No matching active transaction found.", status=200)
+    return web.Response(text="Webhook processed successfully", status=200)
   except Exception as e:
-    logger.error(f"Error handling Webhook: {e}")
-    return web.Response(text="Internal server error.", status=500)
+    logger.error(f"Error handling Webhook: {e}", exc_info=True)
+    return web.Response(text="Internal server error", status=500)
 
 
 # ---------- START COMMAND ----------
@@ -216,55 +268,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   )
 
 
-# ---------- DIRECT CLAIM CALLBACK ----------
-async def claim_key_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  query = update.callback_query
-  await query.answer()
-  data = query.data
-
-  if data.startswith("claim_"):
-    order_id = data.split("_")[1]
-    user_id = query.from_user.id
-
-    session = active_checkout_sessions.get(user_id)
-    if not session or session["order_id"] != order_id:
-      await query.message.reply_text("❌ Checkout session expired or already completed.")
-      return
-
-    file_path = get_file_path_for_product(session["product"])
-    if not file_path:
-      await query.message.reply_text("❌ Invalid product mapping.")
-      return
-
-    keys, _ = await fetch_keys_from_github(file_path)
-    if not keys:
-      await query.message.reply_text("⚠️ Stock pool for this duration is empty. Please contact support @c_sandeep.")
-      return
-
-    delivered_key = keys[0]
-    success = await remove_key_from_github(file_path, delivered_key)
-    if not success:
-      await query.message.reply_text("❌ Failed to update key repository. Please contact support.")
-      return
-
-    active_checkout_sessions.pop(user_id, None)
-
-    if user_id not in user_purchased_keys:
-      user_purchased_keys[user_id] = []
-    user_purchased_keys[user_id].append({
-        "product": session["product"],
-        "key": delivered_key,
-        "price": session["price"],
-    })
-
-    await query.message.edit_text(
-        f"✅ **Payment Done & Verified!**\n\n"
-        f"📦 Product: `{session['product']}`\n"
-        f"🔑 Your Key:\n`{delivered_key}`",
-        parse_mode="Markdown"
-    )
-
-
 # ---------- CORE MESSAGE HANDLER ----------
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
   text = update.message.text
@@ -272,6 +275,44 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
   if context.user_data is None:
     context.user_data = {}
+
+  # Check if user has an active checkout session waiting for a UTR input
+  if user_id in active_checkout_sessions and active_checkout_sessions[user_id].get("waiting_for_utr"):
+    if re.match(r"^\d{6,15}$", text.strip()):
+      utr_number = text.strip()
+      session = active_checkout_sessions[user_id]
+      uro_pay_order_id = session["uroPayOrderId"]
+
+      # Call Uropay PATCH /order/update endpoint
+      hashed_secret = get_hashed_secret(URO_SECRET)
+      headers = {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "X-API-KEY": URO_API_KEY,
+          "Authorization": f"Bearer {hashed_secret}"
+      }
+      payload = {
+          "uroPayOrderId": uro_pay_order_id,
+          "referenceNumber": utr_number
+      }
+
+      async with aiohttp.ClientSession() as client:
+        try:
+          async with client.patch(f"{URO_BASE_URL}/order/update", headers=headers, json=payload, timeout=10) as resp:
+            if resp.status in [200, 201]:
+              session["waiting_for_utr"] = False
+              await update.message.reply_text(
+                  "✅ **UTR Submitted Successfully!**\n\n"
+                  "Verifying payment through Uropay companion app... Your key will be sent here automatically as soon as confirmed.",
+                  parse_mode="Markdown",
+                  reply_markup=main_menu
+              )
+              return
+        except Exception as e:
+          logger.error(f"Error updating Uropay order: {e}")
+
+      await update.message.reply_text("❌ Failed to submit UTR to Uropay. Please check the UTR or contact support.")
+      return
 
   if text == "🔑 Purchase Key" or text == "⬅️ Back to Brands":
     await update.message.reply_text("🎮 Select a brand:", reply_markup=brands_menu)
@@ -306,8 +347,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **How to Buy License Keys:**\n\n"
         "1️⃣ Tap **🔑 Purchase Key** from the main menu.\n"
         "2️⃣ Select your desired loader brand and duration.\n"
-        "3️⃣ Pay via UPI to `c.sandeep@superyes`.\n"
-        "4️⃣ Click **'✅ I Have Paid - Get Code Instantly'** to get your key immediately! 🚀"
+        "3️⃣ Scan the official QR code and pay via UPI.\n"
+        "4️⃣ Send your **12-digit UTR / Reference Number** directly in chat when prompted to get your key instantly! 🚀"
     )
     await update.message.reply_text(
         guide_text, parse_mode="Markdown", reply_markup=main_menu
@@ -336,73 +377,72 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
       base_price = int(prices[0])
-      random_suffix = random.randint(1000, 9999)
-      order_id = f"ORD{random_suffix}"
+      amount_in_paise = base_price * 100  # UroPay requires amount in paise
+      merchant_order_id = f"ORD{random.randint(10000, 99999)}"
 
-      payment_url = None
-      payment_token = order_id
+      hashed_secret = get_hashed_secret(URO_SECRET)
+      headers = {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "X-API-KEY": URO_API_KEY,
+          "Authorization": f"Bearer {hashed_secret}"
+      }
+      payload = {
+          "amount": amount_in_paise,
+          "merchantOrderId": merchant_order_id,
+          "customerName": update.effective_user.first_name or "Telegram User",
+          "customerEmail": f"user_{user_id}@telegram.org",
+          "transactionNote": f"Payment for {text}"
+      }
+
+      uro_pay_order_id = None
+      qr_code_base64 = None
 
       async with aiohttp.ClientSession() as client:
-        headers = {
-            "Authorization": f"Bearer {URO_API_KEY}",
-            "Accept": "application/json"
-        }
-        payload = {
-            "amount": str(base_price),
-            "currency": "INR",
-            "order_id": order_id,
-            "callback_url": "https://xscilents-bot.onrender.com/webhook"
-        }
         try:
-          async with client.post(URO_INITIATE_URL, headers=headers, json=payload, timeout=10) as resp:
+          async with client.post(f"{URO_BASE_URL}/order/generate", headers=headers, json=payload, timeout=15) as resp:
             resp_text = await resp.text()
             logger.info(f"Uropay response status: {resp.status}, body: {resp_text}")
             if resp.status in [200, 201]:
               res_data = json.loads(resp_text)
-              payment_url = res_data.get("payment_url") or res_data.get("url")
+              data = res_data.get("data", {})
+              uro_pay_order_id = data.get("uroPayOrderId")
+              qr_code_base64 = data.get("qrCode")
         except Exception as api_err:
           logger.error(f"Uropay API call exception: {api_err}", exc_info=True)
 
-      # Fallback safe URL if API URL is missing or invalid
-      if not payment_url or not payment_url.startswith(("http://", "https://")):
-        payment_url = "https://t.me/c_sandeep"
+      if not uro_pay_order_id or not qr_code_base64:
+        await update.message.reply_text("❌ Failed to initiate Uropay order. Please check your API credentials or try again later.")
+        return
 
+      # Save checkout session and mark waiting for UTR
       active_checkout_sessions[user_id] = {
           "product": text,
           "price": float(base_price),
-          "order_id": order_id,
-          "token": payment_token
+          "merchantOrderId": merchant_order_id,
+          "uroPayOrderId": uro_pay_order_id,
+          "waiting_for_utr": True
       }
 
-      # Generate UPI QR Code
-      upi_qr_string = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
-      qr = qrcode.QRCode(version=1, box_size=10, border=4)
-      qr.add_data(upi_qr_string)
-      qr.make(fit=True)
-      img = qr.make_image(fill_color="black", back_color="white")
+      # Decode Base64 QR Code from Uropay response
+      if "," in qr_code_base64:
+        qr_code_base64 = qr_code_base64.split(",")[1]
+      img_bytes = base64.b64decode(qr_code_base64)
 
-      bio = io.BytesIO()
-      bio.name = "gateway_qr.png"
-      img.save(bio, "PNG")
+      bio = io.BytesIO(img_bytes)
+      bio.name = "uro_qr.png"
       bio.seek(0)
 
       checkout_caption = (
           f"💳 **Payment Checkout (Uropay)**\n\n"
           f"💵 Amount: **₹{base_price}**\n"
-          f"📦 Item: `{text}`\n"
-          f"🎯 Pay To UPI: `c.sandeep@superyes`\n\n"
-          f"⚠️ *Skip the gateway confirmation page to avoid errors.*\n"
-          f"After completing your payment, click the button below to get your code instantly!"
+          f"📦 Item: `{text}`\n\n"
+          f"📲 Scan the QR code above using any UPI app to pay.\n"
+          f"👉 **After payment, please reply directly in this chat with your 12-digit UTR / Reference Number.**"
       )
 
-      keyboard = [
-          [InlineKeyboardButton("🌐 Open Payment Page", url=payment_url)],
-          [InlineKeyboardButton("✅ I Have Paid - Get Code Instantly", callback_data=f"claim_{order_id}")]
-      ]
-      reply_markup_inline = InlineKeyboardMarkup(keyboard)
-
       await update.message.reply_photo(
-          photo=bio, caption=checkout_caption, parse_mode="Markdown", reply_markup=reply_markup_inline
+          photo=bio, caption=checkout_caption, parse_mode="Markdown"
       )
     except Exception as e:
       logger.error(f"CRITICAL EXCEPTION IN CHECKOUT: {e}", exc_info=True)
@@ -423,7 +463,6 @@ async def main():
   application = Application.builder().token(TOKEN).build()
 
   application.add_handler(CommandHandler("start", start))
-  application.add_handler(CallbackQueryHandler(claim_key_callback, pattern="^claim_"))
   application.add_handler(
       MessageHandler(filters.TEXT & ~filters.COMMAND, buttons)
   )
