@@ -6,6 +6,7 @@ import os
 import random
 import re
 import urllib.parse
+import aiohttp
 from aiohttp import web
 import qrcode
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
@@ -35,7 +36,7 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
 MERCHANT_UPI_ID = "c.sandeep@superyes"
 MERCHANT_NAME = "Key Store"
 
-# API Gateway Credentials (Updated with your keys)
+# API Gateway Credentials
 PUBLIC_KEY = "pk_S4ORIDY0HZnx8IsK"
 SECRET_KEY = "Sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
 
@@ -236,7 +237,7 @@ async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_T
       return
 
     try:
-      # ⚠️ REPLACE THIS URL WITH YOUR PAYMENT GATEWAY'S ACTUAL STATUS CHECK ENDPOINT
+      # ⚠️ Make sure to update this URL to your payment gateway's actual status check endpoint
       api_url = f"https://api.yourgateway.com/v1/orders/{order_id}"
       
       payment_successful = False
