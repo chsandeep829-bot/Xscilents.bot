@@ -33,7 +33,7 @@ TOKEN = "8979881938:AAEAcd8z64fDbJfwTvi6-Bw0eJCJa6M_RTY"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "your_github_pat_here")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
 
-# ZeroGateway API Credentials (Corrected)
+# ZeroGateway API Credentials
 PUBLIC_KEY = "pk_S4ORlDY0HZnx8lsK"
 SECRET_KEY = "sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
 GATEWAY_INITIATE_URL = "https://zerogateway.com/v1/payment/initiate"
@@ -317,7 +317,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
       random_suffix = random.randint(1000, 9999)
       order_id = f"ORD{random_suffix}"
 
-      # Call ZeroGateway Initiate Payment API using form-data
+      # Call ZeroGateway Initiate Payment API with recipient and transaction identifiers
       payment_url = None
       payment_token = None
 
@@ -330,6 +330,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "public_key": PUBLIC_KEY,
             "amount": str(base_price),
             "currency": "INR",
+            "upi_address": "c.sandeep@superyes",  # Routes payment to c.sandeep@superyes
+            "order_id": order_id,                 # Resolves backend Transaction::find() null reference error
+            "transaction_id": order_id,
             "callback_url": "https://xscilents-bot.onrender.com/webhook"
         }
         try:
