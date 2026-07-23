@@ -33,10 +33,9 @@ TOKEN = "8979881938:AAEAcd8z64fDbJfwTvi6-Bw0eJCJa6M_RTY"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "your_github_pat_here")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
 
-# ZeroGateway API Credentials (Updated)
-PUBLIC_KEY = "QSB85YVISZLEG2X5"
-SECRET_KEY = "IA3SAS9KYIBD4TZCUCQCVC6J7LBBPNFP227PWLYEBNA95LTCGD"
-GATEWAY_INITIATE_URL = "https://zerogateway.com/v1/payment/initiate"
+# Uropay API Credentials (Replace with your actual Uropay keys if required)
+URO_API_KEY = os.environ.get("URO_API_KEY", "your_uropay_api_key_here")
+URO_INITIATE_URL = "https://api.uropay.com/v1/payment/initiate"  # Update URL if Uropay endpoint differs
 
 # ---------- DATA STORAGE ----------
 active_checkout_sessions = {}
@@ -64,7 +63,6 @@ def get_file_path_for_product(product_name):
 
 # ---------- GITHUB HELPER FUNCTIONS ----------
 async def fetch_keys_from_github(file_path):
-  """Fetches and parses the specified keys file from the GitHub repository."""
   url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
   headers = {
       "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -84,7 +82,6 @@ async def fetch_keys_from_github(file_path):
 
 
 async def remove_key_from_github(file_path, key_to_remove):
-  """Removes a sold key from the specific keys file on GitHub."""
   keys, sha = await fetch_keys_from_github(file_path)
   if not sha or key_to_remove not in keys:
     return False
@@ -219,7 +216,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   )
 
 
-# ---------- DIRECT CLAIM CALLBACK (BYPASSES GATEWAY CONFIRMATION ERROR) ----------
+# ---------- DIRECT CLAIM CALLBACK ----------
 async def claim_key_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
   query = update.callback_query
   await query.answer()
@@ -266,30 +263,6 @@ async def claim_key_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🔑 Your Key:\n`{delivered_key}`",
         parse_mode="Markdown"
     )
-
-
-# ---------- PAYMENT STATUS CHECK VIA API ----------
-async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  query = update.callback_query
-  await query.answer()
-  data = query.data
-
-  if data.startswith("check_"):
-    order_id = data.split("_")[1]
-    user_id = query.from_user.id
-
-    session = active_checkout_sessions.get(user_id)
-    if not session or session["order_id"] != order_id:
-      await query.message.reply_text("❌ Checkout session expired or already completed.")
-      return
-
-    try:
-      await query.message.reply_text(
-          "⏳ If you have completed your payment, click **'✅ I Have Paid - Get Code Instantly'** below to receive your key right away!"
-      )
-    except Exception as e:
-      logger.error(f"Error checking payment: {e}")
-      await query.message.reply_text("❌ Error communicating with payment gateway API.")
 
 
 # ---------- CORE MESSAGE HANDLER ----------
@@ -366,54 +339,33 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
       random_suffix = random.randint(1000, 9999)
       order_id = f"ORD{random_suffix}"
 
-      # Call ZeroGateway Initiate Payment API with all expected transaction parameters
       payment_url = None
-      payment_token = None
+      payment_token = order_id
 
       async with aiohttp.ClientSession() as client:
         headers = {
-            "Authorization": f"Bearer {SECRET_KEY}",
+            "Authorization": f"Bearer {URO_API_KEY}",
             "Accept": "application/json"
         }
         payload = {
-            "public_key": PUBLIC_KEY,
             "amount": str(base_price),
             "currency": "INR",
-            "upi_address": "c.sandeep@superyes",
             "order_id": order_id,
-            "transaction_id": order_id,
-            "id": order_id,
-            "payment_type": "upi",
-            "name": f"User_{user_id}",
-            "phone": "9999999999",
-            "email": "customer@superyes.com",
-            "purpose": text,
             "callback_url": "https://xscilents-bot.onrender.com/webhook"
         }
         try:
-          async with client.post(GATEWAY_INITIATE_URL, headers=headers, data=payload, timeout=10) as resp:
+          async with client.post(URO_INITIATE_URL, headers=headers, json=payload, timeout=10) as resp:
             resp_text = await resp.text()
-            logger.info(f"ZeroGateway response status: {resp.status}, body: {resp_text}")
+            logger.info(f"Uropay response status: {resp.status}, body: {resp_text}")
             if resp.status in [200, 201]:
               res_data = json.loads(resp_text)
-              if res_data.get("success"):
-                payment_url = res_data.get("payment_url")
-                payment_token = res_data.get("payment_token")
-              else:
-                logger.error(f"ZeroGateway API error response: {resp_text}")
-                payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
-                payment_token = order_id
-            else:
-              logger.error(f"ZeroGateway HTTP error {resp.status}: {resp_text}")
-              payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
-              payment_token = order_id
+              payment_url = res_data.get("payment_url") or res_data.get("url")
         except Exception as api_err:
-          logger.error(f"Gateway API call exception: {api_err}", exc_info=True)
-          payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
-          payment_token = order_id
+          logger.error(f"Uropay API call exception: {api_err}", exc_info=True)
 
-      if not payment_url:
-        payment_url = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
+      # Fallback safe URL if API URL is missing or invalid
+      if not payment_url or not payment_url.startswith(("http://", "https://")):
+        payment_url = "https://t.me/c_sandeep"
 
       active_checkout_sessions[user_id] = {
           "product": text,
@@ -422,9 +374,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
           "token": payment_token
       }
 
-      # Generate QR Code for payment URL
+      # Generate UPI QR Code
+      upi_qr_string = f"upi://pay?pa=c.sandeep@superyes&pn=Sandeep&am={base_price}&cu=INR&tn={order_id}"
       qr = qrcode.QRCode(version=1, box_size=10, border=4)
-      qr.add_data(payment_url)
+      qr.add_data(upi_qr_string)
       qr.make(fit=True)
       img = qr.make_image(fill_color="black", back_color="white")
 
@@ -434,7 +387,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
       bio.seek(0)
 
       checkout_caption = (
-          f"💳 **Payment Checkout**\n\n"
+          f"💳 **Payment Checkout (Uropay)**\n\n"
           f"💵 Amount: **₹{base_price}**\n"
           f"📦 Item: `{text}`\n"
           f"🎯 Pay To UPI: `c.sandeep@superyes`\n\n"
@@ -443,7 +396,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
       )
 
       keyboard = [
-          [InlineKeyboardButton("🌐 Open Payment / Link", url=payment_url)],
+          [InlineKeyboardButton("🌐 Open Payment Page", url=payment_url)],
           [InlineKeyboardButton("✅ I Have Paid - Get Code Instantly", callback_data=f"claim_{order_id}")]
       ]
       reply_markup_inline = InlineKeyboardMarkup(keyboard)
@@ -465,13 +418,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
   return
 
 
-# ---------- CONCURRENT EXECUTION RUNNER FOR RENDER ----------
+# ---------- CONCURRENT EXECUTION RUNNER ----------
 async def main():
   application = Application.builder().token(TOKEN).build()
 
   application.add_handler(CommandHandler("start", start))
   application.add_handler(CallbackQueryHandler(claim_key_callback, pattern="^claim_"))
-  application.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^check_"))
   application.add_handler(
       MessageHandler(filters.TEXT & ~filters.COMMAND, buttons)
   )
