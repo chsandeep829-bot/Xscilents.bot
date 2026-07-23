@@ -32,13 +32,10 @@ TOKEN = "8979881938:AAEAcd8z64fDbJfwTvi6-Bw0eJCJa6M_RTY"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "your_github_pat_here")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
 
-# UPI Details
-MERCHANT_UPI_ID = "c.sandeep@superyes"
-MERCHANT_NAME = "Key Store"
-
-# API Gateway Credentials
-PUBLIC_KEY = "pk_S4ORIDY0HZnx8IsK"
-SECRET_KEY = "Sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
+# ZeroGateway API Credentials
+PUBLIC_KEY = "pk_S4ORlDY0HZnx8IsK"
+SECRET_KEY = "sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
+GATEWAY_INITIATE_URL = "https://zerogateway.com/v1/payment/initiate"
 
 # ---------- DATA STORAGE ----------
 active_checkout_sessions = {}
@@ -148,7 +145,7 @@ async def health_check(request):
 async def handle_notification_webhook(request):
   try:
     data = await request.json()
-    detected_utr = data.get("utr", data.get("transaction_id", ""))
+    detected_utr = data.get("utr", data.get("transaction_id", data.get("payment_token", "")))
     detected_amount = data.get("amount", data.get("paid_amount", 0))
 
     if detected_utr and detected_amount:
@@ -237,67 +234,10 @@ async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_T
       return
 
     try:
-      # ⚠️ Make sure to update this URL to your payment gateway's actual status check endpoint
-      api_url = f"https://api.yourgateway.com/v1/orders/{order_id}"
-      
-      payment_successful = False
-      detected_utr = f"UTR{random.randint(100000000, 999999999)}"
-
-      async with aiohttp.ClientSession() as client:
-        headers = {
-            "Authorization": f"Bearer {SECRET_KEY}",
-            "X-API-Key": SECRET_KEY,
-            "Public-Key": PUBLIC_KEY
-        }
-        try:
-          async with client.get(api_url, headers=headers, timeout=10) as resp:
-            if resp.status == 200:
-              res_data = await resp.json()
-              if res_data.get("status") in ["SUCCESS", "PAID", "COMPLETED"]:
-                payment_successful = True
-                detected_utr = res_data.get("utr", detected_utr)
-        except Exception as api_err:
-          logger.warning(f"API connection note: {api_err}")
-
-      if payment_successful:
-        file_path = get_file_path_for_product(session["product"])
-        if not file_path:
-          await query.message.reply_text("❌ Invalid product configuration.")
-          return
-
-        keys, _ = await fetch_keys_from_github(file_path)
-        if not keys:
-          await query.message.reply_text("⚠️ Payment confirmed, but stock pool for this duration is empty! Contact support.")
-          return
-
-        delivered_key = keys[0]
-        success = await remove_key_from_github(file_path, delivered_key)
-        if not success:
-          await query.message.reply_text("❌ Error updating key inventory. Contact support.")
-          return
-
-        used_utrs.add(detected_utr)
-        active_checkout_sessions.pop(user_id, None)
-
-        if user_id not in user_purchased_keys:
-          user_purchased_keys[user_id] = []
-        user_purchased_keys[user_id].append({
-            "product": session["product"],
-            "key": delivered_key,
-            "price": session["price"],
-        })
-
-        await query.message.edit_text(
-            f"✅ **Payment Verified Successfully!**\n\n"
-            f"📦 Product: `{session['product']}`\n"
-            f"🔑 Your Key:\n`{delivered_key}`",
-            parse_mode="Markdown"
-        )
-      else:
-        await query.message.reply_text(
-            "⏳ Payment not detected yet or still pending.\n\n"
-            "If you have already paid the exact amount, please wait a moment and try clicking the button again."
-        )
+      # If payment token / order was already tracked or we want to verify via webhook/manual check
+      await query.message.reply_text(
+          "⏳ If you have completed your payment on ZeroGateway, please wait a moment for instant webhook delivery, or click your 'My Keys' section shortly."
+      )
 
     except Exception as e:
       logger.error(f"Error checking payment: {e}")
@@ -345,8 +285,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **How to Buy License Keys:**\n\n"
         "1️⃣ Tap **🔑 Purchase Key** from the main menu.\n"
         "2️⃣ Select your desired loader brand and duration.\n"
-        "3️⃣ Scan the QR code and pay the exact amount.\n"
-        "4️⃣ Click the **🔄 Check Payment Status** button to receive your key instantly! 🚀"
+        "3️⃣ Open the checkout link or scan the QR code to pay.\n"
+        "4️⃣ Your key will be delivered instantly upon successful payment! 🚀"
     )
     await update.message.reply_text(
         guide_text, parse_mode="Markdown", reply_markup=main_menu
@@ -375,51 +315,63 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
       base_price = int(prices[0])
-      paisa_offset = round(random.randint(1, 99) / 100.0, 2)
-      price_amount = f"{base_price + paisa_offset:.2f}"
-
       random_suffix = random.randint(1000, 9999)
       order_id = f"ORD{random_suffix}"
 
+      # Call ZeroGateway Initiate Payment API
+      payment_url = "https://zerogateway.com/v1/checkout/DEFAULT"
+      payment_token = f"TXN{random.randint(1000000000, 9999999999)}"
+
+      async with aiohttp.ClientSession() as client:
+        headers = {
+            "Authorization": f"Bearer {SECRET_KEY}" #
+        }
+        payload = {
+            "public_key": PUBLIC_KEY, #
+            "amount": base_price, #
+            "currency": "INR", #
+            "callback_url": "https://xscilents-bot.onrender.com/webhook" #
+        }
+        try:
+          async with client.post(GATEWAY_INITIATE_URL, headers=headers, json=payload, timeout=10) as resp:
+            if resp.status in [200, 201]:
+              res_data = await resp.json()
+              if res_data.get("success"):
+                payment_url = res_data.get("payment_url", payment_url) #
+                payment_token = res_data.get("payment_token", payment_token) #
+        except Exception as api_err:
+          logger.warning(f"Gateway API call warning: {api_err}")
+
       active_checkout_sessions[user_id] = {
           "product": text,
-          "price": price_amount,
+          "price": float(base_price),
           "order_id": order_id,
+          "token": payment_token
       }
 
-      upi_payload = {
-          "pa": str(MERCHANT_UPI_ID).strip(),
-          "pn": str(MERCHANT_NAME).strip(),
-          "am": price_amount,
-          "cu": "INR",
-          "tn": f"pay_ord{random_suffix}",
-      }
-
-      encoded_url = "upi://pay?" + urllib.parse.urlencode(
-          upi_payload, quote_via=urllib.parse.quote
-      )
-
+      # Generate QR Code for ZeroGateway payment URL
       qr = qrcode.QRCode(version=1, box_size=10, border=4)
-      qr.add_data(encoded_url)
+      qr.add_data(payment_url)
       qr.make(fit=True)
       img = qr.make_image(fill_color="black", back_color="white")
 
       bio = io.BytesIO()
-      bio.name = "upi_qr.png"
+      bio.name = "gateway_qr.png"
       img.save(bio, "PNG")
       bio.seek(0)
 
       checkout_caption = (
-          f"💳 **Payment Checkout**\n\n"
-          f"💵 Exact Amount: **₹{price_amount}** *(Pay exact amount)*\n"
+          f"💳 **ZeroGateway Checkout**\n\n"
+          f"💵 Amount: **₹{base_price}**\n"
           f"📦 Item: `{text}`\n"
-          f"🧾 Order ID: `{order_id}`\n\n"
-          f"📱 **Scan QR code or use UPI link:**\n`{encoded_url}`\n\n"
-          f"After paying, tap the button below to fetch your key!"
+          f"🧾 Payment Token: `{payment_token}`\n\n"
+          f"🔗 **Or click checkout link:**\n{payment_url}\n\n"
+          f"Scan the QR code or open the link to complete your payment!"
       )
 
       keyboard = [
-          [InlineKeyboardButton("🔄 Check Payment Status", callback_data=f"check_{order_id}")]
+          [InlineKeyboardButton("🌐 Open Checkout Link", url=payment_url)],
+          [InlineKeyboardButton("🔄 Refresh Status", callback_data=f"check_{order_id}")]
       ]
       reply_markup_inline = InlineKeyboardMarkup(keyboard)
 
