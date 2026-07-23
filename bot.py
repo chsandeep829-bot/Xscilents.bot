@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import io
 import logging
 import os
@@ -26,7 +27,11 @@ logger = logging.getLogger(__name__)
 # ---------- CONFIGURATION ----------
 TOKEN = "8979881938:AAEAcd8z64fDbJfwTvi6-Bw0eJCJa6M_RTY"
 
-# UPI Details (Required for the QR Code)
+# GitHub Configuration (Set these in Render Environment Variables)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "your_github_pat_here")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "your-username/key-store-database")
+
+# UPI Details
 MERCHANT_UPI_ID = "c.sandeep@superyes"
 MERCHANT_NAME = "Key Store"
 
@@ -38,13 +43,78 @@ SECRET_KEY = "sk_p9TLHwDrMZpxZf44pfOXuXNWPScsADKh"
 active_checkout_sessions = {}
 used_utrs = set()
 user_purchased_keys = {}
-license_keys = [
-    "XS-5H-ABCD-1234",
-    "XS-1D-EFGH-5678",
-    "XS-7D-IJKL-9012",
-    "XS-30D-MNOP-3456",
-    "XS-FS-QRST-7890",
-]
+
+
+# ---------- PRODUCT TO GITHUB FILE MAPPING ----------
+def get_file_path_for_product(product_name):
+  product_name = product_name.upper()
+  if "5 HOURS" in product_name:
+    return "keys_5h.txt"
+  elif "1 DAY" in product_name:
+    return "keys_1d.txt"
+  elif "3 DAYS" in product_name:
+    return "keys_3d.txt"
+  elif "7 DAYS" in product_name:
+    return "keys_7d.txt"
+  elif "30 DAYS" in product_name:
+    return "keys_30d.txt"
+  elif "FULL SEASON" in product_name:
+    return "keys_season.txt"
+  return None
+
+
+# ---------- GITHUB HELPER FUNCTIONS ----------
+async def fetch_keys_from_github(file_path):
+  """Fetches and parses the specified keys file from the GitHub repository."""
+  url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+  headers = {
+      "Authorization": f"Bearer {GITHUB_TOKEN}",
+      "Accept": "application/vnd.github+json",
+  }
+  async with aiohttp.ClientSession() as session:
+    try:
+      async with session.get(url, headers=headers) as resp:
+        if resp.status == 200:
+          data = await resp.json()
+          file_content = base64.b64decode(data["content"]).decode("utf-8")
+          keys = [line.strip() for line in file_content.splitlines() if line.strip()]
+          return keys, data.get("sha")
+    except Exception as e:
+      logger.error(f"Error fetching keys from GitHub ({file_path}): {e}")
+  return [], None
+
+
+async def remove_key_from_github(file_path, key_to_remove):
+  """Removes a sold key from the specific keys file on GitHub."""
+  keys, sha = await fetch_keys_from_github(file_path)
+  if not sha or key_to_remove not in keys:
+    return False
+
+  keys.remove(key_to_remove)
+  updated_content = "\n".join(keys) + ("\n" if keys else "")
+  encoded_content = base64.b64encode(updated_content.encode("utf-8")).decode("utf-8")
+
+  url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+  headers = {
+      "Authorization": f"Bearer {GITHUB_TOKEN}",
+      "Accept": "application/vnd.github+json",
+  }
+  payload = {
+      "message": f"Auto-remove sold key: {key_to_remove}",
+      "content": encoded_content,
+      "sha": sha,
+  }
+
+  async with aiohttp.ClientSession() as session:
+    try:
+      async with session.put(url, headers=headers, json=payload) as resp:
+        if resp.status in [200, 201]:
+          logger.info(f"Successfully removed key {key_to_remove} from {file_path}.")
+          return True
+    except Exception as e:
+      logger.error(f"Error updating GitHub keys file ({file_path}): {e}")
+  return False
+
 
 # ---------- MENUS ----------
 main_menu = ReplyKeyboardMarkup(
@@ -61,8 +131,9 @@ brands_menu = ReplyKeyboardMarkup([["XSCILENT LOADER"], ["⬅️ Back"]], resize
 xscilent_menu = ReplyKeyboardMarkup(
     [
         ["XSCILENT 5 HOURS - ₹40", "XSCILENT 1 DAY - ₹100"],
-        ["XSCILENT 7 DAYS - ₹300", "XSCILENT 30 DAYS - ₹800"],
-        ["XSCILENT FULL SEASON - ₹1200", "⬅️ Back to Brands"],
+        ["XSCILENT 3 DAYS - ₹180", "XSCILENT 7 DAYS - ₹300"],
+        ["XSCILENT 30 DAYS - ₹800", "XSCILENT FULL SEASON - ₹1200"],
+        ["⬅️ Back to Brands"],
     ],
     resize_keyboard=True,
 )
@@ -70,12 +141,10 @@ xscilent_menu = ReplyKeyboardMarkup(
 
 # ---------- WEB SERVER ROUTES FOR RENDER ----------
 async def health_check(request):
-  """Handles Render health check pings to keep the web service active."""
   return web.Response(text="Bot is running and active on Render!", status=200)
 
 
 async def handle_notification_webhook(request):
-  """Listens for automated payment gateway webhooks."""
   try:
     data = await request.json()
     detected_utr = data.get("utr", data.get("transaction_id", ""))
@@ -98,14 +167,23 @@ async def handle_notification_webhook(request):
           break
 
       if matched_user_id and matched_session:
-        if not license_keys:
+        file_path = get_file_path_for_product(matched_session["product"])
+        if not file_path:
+          return web.Response(text="Invalid product mapping.", status=400)
+
+        keys, _ = await fetch_keys_from_github(file_path)
+        if not keys:
           await request.app["tg_bot"].send_message(
               chat_id=matched_user_id,
-              text="⚠️ **Payment Confirmed!** However, stock pool is empty. Contact support.",
+              text="⚠️ **Payment Confirmed!** However, stock pool for this duration is empty. Contact support.",
           )
           return web.Response(text="Stock Empty fallback executed.", status=200)
 
-        delivered_key = license_keys.pop(0)
+        delivered_key = keys[0]
+        success = await remove_key_from_github(file_path, delivered_key)
+        if not success:
+          return web.Response(text="Failed to update key repository.", status=500)
+
         used_utrs.add(detected_utr)
         active_checkout_sessions.pop(matched_user_id, None)
 
@@ -179,11 +257,22 @@ async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_T
           logger.warning(f"API connection note: {api_err}")
 
       if payment_successful:
-        if not license_keys:
-          await query.message.reply_text("⚠️ Payment confirmed, but stock pool is empty! Contact support.")
+        file_path = get_file_path_for_product(session["product"])
+        if not file_path:
+          await query.message.reply_text("❌ Invalid product configuration.")
           return
 
-        delivered_key = license_keys.pop(0)
+        keys, _ = await fetch_keys_from_github(file_path)
+        if not keys:
+          await query.message.reply_text("⚠️ Payment confirmed, but stock pool for this duration is empty! Contact support.")
+          return
+
+        delivered_key = keys[0]
+        success = await remove_key_from_github(file_path, delivered_key)
+        if not success:
+          await query.message.reply_text("❌ Error updating key inventory. Contact support.")
+          return
+
         used_utrs.add(detected_utr)
         active_checkout_sessions.pop(user_id, None)
 
@@ -254,7 +343,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ Tap **🔑 Purchase Key** from the main menu.\n"
         "2️⃣ Select your desired loader brand and duration.\n"
         "3️⃣ Scan the QR code and pay the exact amount.\n"
-        "4️⃣ Click the **🔄 Check Payment Status** button or let our system verify automatically! 🚀"
+        "4️⃣ Click the **🔄 Check Payment Status** button to receive your key instantly! 🚀"
     )
     await update.message.reply_text(
         guide_text, parse_mode="Markdown", reply_markup=main_menu
